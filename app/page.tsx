@@ -243,11 +243,8 @@ export default function DubberPage() {
       // Step 3: Transcribe — OpenAI Whisper first (most accurate), Gemini as fallback
       setProgress({ step: 'transcribing', message: 'Transcribing audio...', percent: 30 });
       let segments: TranscriptSegment[];
-      if (openaiKey) {
-        // Whisper via OpenAI — very accurate with timestamps
-        segments = await transcribeWithOpenAI(audioBlob, openaiKey);
-      } else if (geminiKey) {
-        // Gemini multimodal fallback — chunked base64 to avoid stack overflow
+
+      const tryGeminiTranscribe = async () => {
         const arrayBuf = await audioBlob.arrayBuffer();
         const bytes = new Uint8Array(arrayBuf);
         let binary = '';
@@ -256,7 +253,22 @@ export default function DubberPage() {
           binary += String.fromCharCode(...(bytes.subarray(i, i + chunkSize) as unknown as number[]));
         }
         const base64 = btoa(binary);
-        segments = await transcribeWithGemini(base64, 'audio/mp3', geminiKey);
+        return transcribeWithGemini(base64, 'audio/mp3', geminiKey);
+      };
+
+      if (openaiKey) {
+        try {
+          segments = await transcribeWithOpenAI(audioBlob, openaiKey);
+        } catch (err: any) {
+          if (geminiKey) {
+            setProgress({ step: 'transcribing', message: 'OpenAI Whisper failed — retrying with Gemini...', percent: 32 });
+            segments = await tryGeminiTranscribe();
+          } else {
+            throw err; // no fallback available
+          }
+        }
+      } else if (geminiKey) {
+        segments = await tryGeminiTranscribe();
       } else {
         throw new Error('No API key for transcription. Please add a Gemini or OpenAI key.');
       }
