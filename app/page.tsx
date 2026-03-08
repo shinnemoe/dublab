@@ -26,7 +26,7 @@ export default function DubberPage() {
   const [showKeys, setShowKeys] = useState(false);
 
   // Settings
-  const [ttsProvider, setTtsProvider] = useState<'openai' | 'edge' | 'gemini'>('openai');
+  const [ttsProvider, setTtsProvider] = useState<'edge' | 'gemini'>('gemini');
   const [targetLang, setTargetLang] = useState('my');
   const [selectedVoice, setSelectedVoice] = useState('alloy');
   const [geminiTtsModel, setGeminiTtsModel] = useState<GeminiTTSModel>('flash');
@@ -68,8 +68,9 @@ export default function DubberPage() {
   useEffect(() => {
     setGeminiKeyState(getKey(STORAGE_KEYS.GEMINI_KEY));
     setOpenaiKeyState(getKey(STORAGE_KEYS.OPENAI_KEY));
-    const savedProvider = getKey(STORAGE_KEYS.TTS_PROVIDER) as 'openai' | 'edge' | 'gemini';
-    if (savedProvider) setTtsProvider(savedProvider);
+    const savedProvider = getKey(STORAGE_KEYS.TTS_PROVIDER);
+    // Only accept valid providers (filter out legacy 'openai' TTS)
+    if (savedProvider === 'edge' || savedProvider === 'gemini') setTtsProvider(savedProvider);
     const savedLang = getKey(STORAGE_KEYS.TARGET_LANG) || 'my';
     if (savedLang) setTargetLang(savedLang);
     const savedCustom = getKey(STORAGE_KEYS.CUSTOM_LANGS);
@@ -90,16 +91,14 @@ export default function DubberPage() {
 
   const saveGeminiKey = (k: string) => { setGeminiKeyState(k); setKey(STORAGE_KEYS.GEMINI_KEY, k); };
   const saveOpenaiKey = (k: string) => { setOpenaiKeyState(k); setKey(STORAGE_KEYS.OPENAI_KEY, k); };
-  const saveProvider = (p: 'openai' | 'edge' | 'gemini') => {
+  const saveProvider = (p: 'edge' | 'gemini') => {
     setTtsProvider(p);
     setKey(STORAGE_KEYS.TTS_PROVIDER, p);
-    // Reset voice to first valid option for this provider
-    if (p === 'openai') setSelectedVoice(OPENAI_VOICES[0]);
-    else if (p === 'edge') {
+    if (p === 'edge') {
       const voices = EDGE_TTS_VOICES[targetLang] || EDGE_TTS_VOICES['en'];
       setSelectedVoice(voices[0]?.voice || 'en-US-AriaNeural');
     } else {
-      setSelectedVoice(`${targetLang}-Wavenet-A`);
+      setSelectedVoice(GEMINI_VOICES[0]);
     }
   };
   const saveLang = (l: string) => { setTargetLang(l); setKey(STORAGE_KEYS.TARGET_LANG, l); };
@@ -118,7 +117,6 @@ export default function DubberPage() {
 
   // Get voices for current language/provider
   const getVoiceOptions = () => {
-    if (ttsProvider === 'openai') return OPENAI_VOICES.map(v => ({ value: v, label: v.charAt(0).toUpperCase() + v.slice(1) }));
     if (ttsProvider === 'edge') {
       const voices = EDGE_TTS_VOICES[targetLang] || EDGE_TTS_VOICES['en'];
       return voices.map(v => ({ value: v.voice, label: v.name }));
@@ -355,11 +353,8 @@ export default function DubberPage() {
           const seg = translatedSegs[i];
           setProgress({ step: 'tts', message: `Speech ${i + 1}/${translatedSegs.length}...`, percent: 60 + Math.round((i / translatedSegs.length) * 20) });
           let buffer: ArrayBuffer;
-          if (ttsProvider === 'openai' && openaiKey) {
-            buffer = await ttsOpenAI(seg.translatedText, selectedVoice, openaiKey);
-          } else {
-            buffer = await ttsEdge(seg.translatedText, selectedVoice);
-          }
+          // Edge TTS for per-segment
+          buffer = await ttsEdge(seg.translatedText, selectedVoice);
           segmentBuffers.push({ seg, buffer });
         }
 
@@ -627,17 +622,16 @@ export default function DubberPage() {
               <h2 className="font-semibold text-gray-200 mb-3">🔊 Voice Engine</h2>
               <div className="space-y-2">
                 {[
-                  { id: 'openai', label: 'OpenAI TTS', badge: 'BYOK', desc: 'Best quality, needs key' },
-                  { id: 'gemini', label: 'Google Flash TTS', badge: 'BYOK', desc: 'gemini-2.5-flash-preview-tts', model: 'flash' as const },
-                  { id: 'gemini', label: 'Google Pro TTS', badge: 'BYOK', desc: 'gemini-2.5-pro-preview-tts', model: 'pro' as const },
-                  { id: 'edge', label: 'Edge TTS', badge: 'FREE', desc: 'No key needed' },
+                  { id: 'gemini' as const, label: 'Google Flash TTS', badge: 'BYOK', desc: 'gemini-2.5-flash-preview-tts', model: 'flash' as const },
+                  { id: 'gemini' as const, label: 'Google Pro TTS', badge: 'BYOK', desc: 'gemini-2.5-pro-preview-tts', model: 'pro' as const },
+                  { id: 'edge' as const, label: 'Edge TTS', badge: 'FREE', desc: 'No key needed' },
                 ].map((p, i) => {
                   const isActive = ttsProvider === p.id && (!p.model || geminiTtsModel === p.model);
                   return (
                     <button
                       key={i}
                       onClick={() => {
-                        saveProvider(p.id as 'openai' | 'edge' | 'gemini');
+                        saveProvider(p.id);
                         if (p.model) { setGeminiTtsModel(p.model); setSelectedVoice(GEMINI_VOICES[0]); }
                       }}
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-all ${isActive ? 'bg-violet-600' : 'bg-gray-800 hover:bg-gray-700'}`}
