@@ -30,7 +30,8 @@ export default function DubberPage() {
   const [targetLang, setTargetLang] = useState('my');
   const [selectedVoice, setSelectedVoice] = useState('alloy');
   const [geminiTtsModel, setGeminiTtsModel] = useState<GeminiTTSModel>('flash');
-  const [guidelines, setGuidelines] = useState('');
+  const [translationRules, setTranslationRules] = useState('');
+  const [ttsRules, setTtsRules] = useState('');
   const [customLangs, setCustomLangs] = useState<{ code: string; name: string; flag: string }[]>([]);
   const [newLangName, setNewLangName] = useState('');
   const [showAddLang, setShowAddLang] = useState(false);
@@ -75,6 +76,10 @@ export default function DubberPage() {
     if (savedCustom) {
       try { setCustomLangs(JSON.parse(savedCustom)); } catch { }
     }
+    const savedTranslationRules = getKey(STORAGE_KEYS.TRANSLATION_RULES);
+    if (savedTranslationRules) setTranslationRules(savedTranslationRules);
+    const savedTtsRules = getKey(STORAGE_KEYS.TTS_RULES);
+    if (savedTtsRules) setTtsRules(savedTtsRules);
     // Reset voice if saved voice is incompatible with saved provider
     const savedVoice = selectedVoice;
     if (savedProvider === 'edge' && !/^[a-z]{2}-[A-Z]{2}-/.test(savedVoice)) {
@@ -286,9 +291,9 @@ export default function DubberPage() {
       const langName = allLanguages.find(l => l.code === targetLang)?.name || targetLang;
       let translatedSegs;
       if (geminiKey) {
-        translatedSegs = await translateWithGemini(segments, langName, guidelines, geminiKey);
+        translatedSegs = await translateWithGemini(segments, langName, translationRules, geminiKey);
       } else if (openaiKey) {
-        translatedSegs = await translateWithOpenAI(segments, langName, guidelines, openaiKey);
+        translatedSegs = await translateWithOpenAI(segments, langName, translationRules, openaiKey);
       } else {
         throw new Error('No API key for translation.');
       }
@@ -314,7 +319,11 @@ export default function DubberPage() {
         // ── Whole-text Gemini TTS: one consistent audio, speed-adjust to fit video ──
         setProgress({ step: 'tts', message: 'Generating dubbed audio (Gemini, whole text)...', percent: 65 });
         const fullText = translatedSegs.map(s => s.translatedText).join('\n\n');
-        const wholeAudio = await ttsGemini(fullText, selectedVoice, geminiKey, geminiTtsModel);
+        // Prepend TTS style rules to the full text (Gemini TTS is prompt-directed)
+        const ttsPrompt = ttsRules.trim()
+          ? `[Speaking style: ${ttsRules.trim()}]\n\n${fullText}`
+          : fullText;
+        const wholeAudio = await ttsGemini(ttsPrompt, selectedVoice, geminiKey, geminiTtsModel);
 
         // WAV duration: (bytes - 44 header) / (24000Hz * 2 bytes * 1 channel)
         const ttsDuration = (wholeAudio.byteLength - 44) / 48000;
@@ -543,16 +552,29 @@ export default function DubberPage() {
                 onChange={e => { if (e.target.files?.[0]) handleFileSelect(e.target.files[0]); }} />
             </div>
 
-            {/* Translation Guidelines */}
+            {/* Translation Rules */}
             <div className="bg-gray-900 border border-gray-700 rounded-2xl p-5">
-              <h2 className="font-semibold text-gray-200 mb-1">📝 Translation Guidelines <span className="text-gray-500 font-normal text-sm">(optional)</span></h2>
-              <p className="text-xs text-gray-500 mb-3">Tell the AI how to translate. E.g.: "Use formal Burmese", "Keep character names in English", "Translate idioms naturally"</p>
+              <h2 className="font-semibold text-gray-200 mb-1">📝 Translation Rules <span className="text-gray-500 font-normal text-sm">(optional)</span></h2>
+              <p className="text-xs text-gray-500 mb-2">Guide the AI on how to translate. Saved automatically.</p>
               <textarea
-                value={guidelines}
-                onChange={e => setGuidelines(e.target.value)}
-                placeholder='e.g. "Use formal tone. Keep technical terms in English. The speaker is a young woman — use appropriate Burmese pronouns."'
+                value={translationRules}
+                onChange={e => { setTranslationRules(e.target.value); setKey(STORAGE_KEYS.TRANSLATION_RULES, e.target.value); }}
+                placeholder='e.g. "Use formal Burmese. Keep character names in English. Translate idioms naturally."'
                 className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500 resize-none"
-                rows={4}
+                rows={3}
+              />
+            </div>
+
+            {/* TTS Style Rules */}
+            <div className="bg-gray-900 border border-gray-700 rounded-2xl p-5">
+              <h2 className="font-semibold text-gray-200 mb-1">🎙️ TTS Style Rules <span className="text-gray-500 font-normal text-sm">(optional, Gemini TTS only)</span></h2>
+              <p className="text-xs text-gray-500 mb-2">Tell Gemini how to speak — tone, pace, accent. Saved automatically.</p>
+              <textarea
+                value={ttsRules}
+                onChange={e => { setTtsRules(e.target.value); setKey(STORAGE_KEYS.TTS_RULES, e.target.value); }}
+                placeholder='e.g. "Speak warmly and enthusiastically. Slow down for dramatic lines. Use a soft, breathy tone."'
+                className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500 resize-none"
+                rows={3}
               />
             </div>
           </div>

@@ -6,6 +6,8 @@ export const STORAGE_KEYS = {
     TTS_PROVIDER: 'dubber_tts_provider',
     TARGET_LANG: 'dubber_target_lang',
     CUSTOM_LANGS: 'dubber_custom_langs',
+    TRANSLATION_RULES: 'dubber_translation_rules',
+    TTS_RULES: 'dubber_tts_rules',
 };
 
 export function getKey(key: string): string {
