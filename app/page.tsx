@@ -52,6 +52,7 @@ export default function DubberPage() {
   const [previewVideoUrl, setPreviewVideoUrl] = useState('');
   const [previewTitle, setPreviewTitle] = useState('');
   const [previewError, setPreviewError] = useState('');
+  const [youtubeId, setYoutubeId] = useState(''); // set when URL is YouTube
   const urlDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolvedVideoUrl = useRef(''); // the actual fetchable video URL
 
@@ -155,6 +156,7 @@ export default function DubberPage() {
     setPreviewVideoUrl('');
     setPreviewError('');
     setPreviewTitle('');
+    setYoutubeId('');
     resolvedVideoUrl.current = '';
     if (urlDebounceRef.current) clearTimeout(urlDebounceRef.current);
     if (!url.trim()) return;
@@ -164,14 +166,19 @@ export default function DubberPage() {
   const fetchPreview = async (url: string) => {
     setPreviewLoading(true);
     setPreviewError('');
+    setYoutubeId('');
     try {
       const res = await fetch(`/api/preview?url=${encodeURIComponent(url)}`);
       const data = await res.json();
       if (data.videoUrl) {
-        setPreviewVideoUrl(data.videoUrl);        // proxied URL for <video> element
+        setPreviewVideoUrl(data.videoUrl);
         setPreviewTitle(data.pageTitle || '');
-        // Store the RAW CDN url for download — not the proxied path
-        resolvedVideoUrl.current = data.rawVideoUrl || data.videoUrl;
+        if (data.youtubeId) setYoutubeId(data.youtubeId);
+        // For YouTube: keep videoUrl (proxied yt-dlp download) as resolved URL
+        // For others: prefer rawVideoUrl (CDN url), fall back to videoUrl
+        resolvedVideoUrl.current = data.youtubeId
+          ? data.videoUrl  // /api/download?url=youtube...
+          : (data.rawVideoUrl || data.videoUrl);
       } else {
         setPreviewError(data.error || 'Could not extract video. This site may block external access — please download and upload the video manually.');
       }
@@ -470,14 +477,34 @@ export default function DubberPage() {
               {/* URL Preview Result */}
               {previewVideoUrl && !videoFile && (
                 <div className="mb-3 rounded-xl overflow-hidden border border-green-700 bg-gray-800">
-                  <video
-                    src={previewVideoUrl}
-                    className="w-full max-h-52"
-                    controls
-                    muted
-                    autoPlay
-                    onError={() => setPreviewError('Video loaded but cannot play in browser. Dubbing may still work — try Start Dubbing.')}
-                  />
+                  {youtubeId ? (
+                    // YouTube: show thumbnail (video can't be previewed in browser due to DRM)
+                    <div className="relative">
+                      <img
+                        src={`https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`}
+                        alt={previewTitle}
+                        className="w-full object-cover"
+                      />
+                      <a
+                        href={`https://www.youtube.com/watch?v=${youtubeId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/60 transition-all"
+                      >
+                        <div className="w-14 h-14 bg-red-600 rounded-full flex items-center justify-center shadow-lg">
+                          <svg viewBox="0 0 24 24" fill="white" className="w-6 h-6 ml-1"><path d="M8 5v14l11-7z" /></svg>
+                        </div>
+                      </a>
+                    </div>
+                  ) : (
+                    // Non-YouTube: play directly
+                    <video
+                      src={previewVideoUrl}
+                      className="w-full max-h-52"
+                      controls muted autoPlay
+                      onError={() => setPreviewError('Video loaded but cannot play in browser. Dubbing may still work — try Start Dubbing.')}
+                    />
+                  )}
                   {previewTitle && <p className="text-xs text-gray-400 px-3 py-1 truncate">{previewTitle}</p>}
                   <p className="text-xs text-green-400 px-3 pb-2">✅ Video found — ready to dub!</p>
                 </div>

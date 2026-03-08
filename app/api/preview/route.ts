@@ -17,6 +17,10 @@ export async function GET(req: NextRequest) {
     // ── YouTube (including Shorts) ───────────────────────────────────────────
     if (isYouTubeUrl(url)) {
         try {
+            // Extract video ID from URL (covers youtube.com/watch, /shorts, youtu.be)
+            const videoIdMatch = url.match(/(?:shorts\/|v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+            const videoId = videoIdMatch?.[1] || '';
+
             const { stdout } = await execFileAsync('yt-dlp', [
                 '--print', 'title',
                 '--no-download',
@@ -28,6 +32,7 @@ export async function GET(req: NextRequest) {
                 videoUrl: '/api/download?url=' + encodeURIComponent(url),
                 pageTitle: title,
                 isYoutube: true,
+                youtubeId: videoId,
             });
         } catch (err: any) {
             return NextResponse.json({ videoUrl: null, error: 'YouTube error: ' + err.message });
