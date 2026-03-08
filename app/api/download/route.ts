@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile, spawn } from 'child_process';
-import { Readable } from 'stream';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { readFile, unlink } from 'fs/promises';
+import { randomUUID } from 'crypto';
 
 export const runtime = 'nodejs';
+
+const execFileAsync = promisify(execFile);
 
 function isYouTubeUrl(url: string): boolean {
     return /youtube\.com|youtu\.be/.test(url);
@@ -12,32 +18,34 @@ export async function GET(req: NextRequest) {
     const url = req.nextUrl.searchParams.get('url');
     if (!url) return NextResponse.json({ error: 'No URL provided' }, { status: 400 });
 
-    // ── YouTube (includes Shorts, youtu.be, etc.) ─────────────────────────────
+    // ── YouTube (includes Shorts) ─────────────────────────────────────────────
+    // Note: MP4 format requires seekable output, cannot stream to stdout.
+    // We download to a temp file then serve it — reliable for Shorts (< 100MB).
     if (isYouTubeUrl(url)) {
+        const tmpPath = join(tmpdir(), `yt-${randomUUID()}.mp4`);
         try {
-            // Stream video via yt-dlp piped to stdout
-            const ytProcess = spawn('yt-dlp', [
-                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            // 720p mp4 + best m4a audio, merged into mp4 file
+            await execFileAsync('yt-dlp', [
+                '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
                 '--merge-output-format', 'mp4',
-                '-o', '-',          // pipe output to stdout
+                '-o', tmpPath,
                 '--no-playlist',
                 url,
-            ]);
+            ], { maxBuffer: 10 * 1024 * 1024 }); // 10MB for stderr/stdout
 
-            const webStream = Readable.toWeb(ytProcess.stdout) as ReadableStream;
-
-            // Collect stderr for error reporting if needed
-            // ytProcess.stderr is not piped so it goes to server logs
-
-            return new NextResponse(webStream, {
+            const videoData = await readFile(tmpPath);
+            return new NextResponse(videoData, {
                 headers: {
                     'Content-Type': 'video/mp4',
+                    'Content-Length': videoData.length.toString(),
                     'Cache-Control': 'no-store',
                     'Access-Control-Allow-Origin': '*',
                 },
             });
         } catch (err: any) {
             return NextResponse.json({ error: 'yt-dlp failed: ' + err.message }, { status: 500 });
+        } finally {
+            await unlink(tmpPath).catch(() => { });
         }
     }
 
