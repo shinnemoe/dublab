@@ -7,7 +7,12 @@ import { randomUUID } from 'crypto';
 
 export async function GET(req: NextRequest) {
     const text = req.nextUrl.searchParams.get('text');
-    const voice = req.nextUrl.searchParams.get('voice') || 'en-US-AriaNeural';
+    let voice = req.nextUrl.searchParams.get('voice') || 'en-US-AriaNeural';
+
+    // Edge TTS requires voices in format xx-XX-VoiceName — fallback if an OpenAI voice was passed
+    if (!/^\w{2}-\w{2}-\w/.test(voice)) {
+        voice = 'en-US-AriaNeural';
+    }
 
     if (!text) return NextResponse.json({ error: 'No text' }, { status: 400 });
 
@@ -18,7 +23,9 @@ export async function GET(req: NextRequest) {
         await mkdir(tmpDir, { recursive: true });
 
         const tts = new MsEdgeTTS();
-        await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+        // Extract locale from voice name (e.g. "my-MM-ThihaNeural" → "my-MM"), default to "en-US"
+        const voiceLocale = voice.match(/^[a-z]{2}-[A-Z]{2}/)?.[0] || 'en-US';
+        await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, { voiceLocale } as any);
         const { audioFilePath } = await tts.toFile(tmpDir, text);
 
         const audio = await readFile(audioFilePath as string);

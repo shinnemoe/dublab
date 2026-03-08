@@ -7,7 +7,7 @@ import {
 } from '@/lib/config';
 import { transcribeWithOpenAI, transcribeWithGemini, TranscriptSegment } from '@/lib/transcribe';
 import { translateWithGemini, translateWithOpenAI, TranslatedSegment } from '@/lib/translate';
-import { ttsOpenAI, ttsEdge, ttsGemini } from '@/lib/tts';
+import { ttsOpenAI, ttsEdge, ttsGemini, GEMINI_VOICES, GeminiTTSModel } from '@/lib/tts';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
@@ -29,6 +29,7 @@ export default function DubberPage() {
   const [ttsProvider, setTtsProvider] = useState<'openai' | 'edge' | 'gemini'>('openai');
   const [targetLang, setTargetLang] = useState('my');
   const [selectedVoice, setSelectedVoice] = useState('alloy');
+  const [geminiTtsModel, setGeminiTtsModel] = useState<GeminiTTSModel>('flash');
   const [guidelines, setGuidelines] = useState('');
   const [customLangs, setCustomLangs] = useState<{ code: string; name: string; flag: string }[]>([]);
   const [newLangName, setNewLangName] = useState('');
@@ -67,11 +68,17 @@ export default function DubberPage() {
     setOpenaiKeyState(getKey(STORAGE_KEYS.OPENAI_KEY));
     const savedProvider = getKey(STORAGE_KEYS.TTS_PROVIDER) as 'openai' | 'edge' | 'gemini';
     if (savedProvider) setTtsProvider(savedProvider);
-    const savedLang = getKey(STORAGE_KEYS.TARGET_LANG);
+    const savedLang = getKey(STORAGE_KEYS.TARGET_LANG) || 'my';
     if (savedLang) setTargetLang(savedLang);
     const savedCustom = getKey(STORAGE_KEYS.CUSTOM_LANGS);
     if (savedCustom) {
       try { setCustomLangs(JSON.parse(savedCustom)); } catch { }
+    }
+    // Reset voice if saved voice is incompatible with saved provider
+    const savedVoice = selectedVoice;
+    if (savedProvider === 'edge' && !/^[a-z]{2}-[A-Z]{2}-/.test(savedVoice)) {
+      const edgeVoices = EDGE_TTS_VOICES[savedLang] || EDGE_TTS_VOICES['en'];
+      setSelectedVoice(edgeVoices[0]?.voice || 'en-US-AriaNeural');
     }
   }, []);
 
@@ -268,31 +275,11 @@ export default function DubberPage() {
       }
       setTranslated(translatedSegs);
 
-      // Step 5: TTS per segment
+      // Step 5: TTS
       setProgress({ step: 'tts', message: 'Generating dubbed audio...', percent: 60 });
-      const segmentBuffers: { seg: TranslatedSegment; buffer: ArrayBuffer }[] = [];
 
-      for (let i = 0; i < translatedSegs.length; i++) {
-        const seg = translatedSegs[i];
-        const pct = 60 + Math.round((i / translatedSegs.length) * 20);
-        setProgress({ step: 'tts', message: `Generating speech for segment ${i + 1}/${translatedSegs.length}...`, percent: pct });
-
-        let buffer: ArrayBuffer;
-        if (ttsProvider === 'openai' && openaiKey) {
-          buffer = await ttsOpenAI(seg.translatedText, selectedVoice, openaiKey);
-        } else if (ttsProvider === 'gemini' && geminiKey) {
-          buffer = await ttsGemini(seg.translatedText, selectedVoice, geminiKey);
-        } else {
-          buffer = await ttsEdge(seg.translatedText, selectedVoice);
-        }
-        segmentBuffers.push({ seg, buffer });
-      }
-
-      // Step 6: Build synced audio timeline using ffmpeg
-      setProgress({ step: 'syncing', message: 'Syncing audio to video timeline...', percent: 82 });
-
-      // Get video duration
-      const durationMatch = await new Promise<number>((resolve) => {
+      // Get video duration first (needed for Gemini speed-adjust mode)
+      const videoDuration = await new Promise<number>((resolve) => {
         (async () => {
           let dur = 0;
           ffmpeg.on('log', ({ message }) => {
@@ -304,52 +291,76 @@ export default function DubberPage() {
         })();
       });
 
-      // Write each segment audio, adjust speed if needed, place at correct timestamp
-      const filterParts: string[] = [];
-      const inputArgs: string[] = ['-i', 'input.mp4'];
+      if (ttsProvider === 'gemini' && geminiKey) {
+        // ── Whole-text Gemini TTS: one consistent audio, speed-adjust to fit video ──
+        setProgress({ step: 'tts', message: 'Generating dubbed audio (Gemini, whole text)...', percent: 65 });
+        const fullText = translatedSegs.map(s => s.translatedText).join('\n\n');
+        const wholeAudio = await ttsGemini(fullText, selectedVoice, geminiKey, geminiTtsModel);
 
-      for (let i = 0; i < segmentBuffers.length; i++) {
-        const { seg, buffer } = segmentBuffers[i];
-        const filename = `seg_${i}.mp3`;
-        await ffmpeg.writeFile(filename, new Uint8Array(buffer));
-        inputArgs.push('-i', filename);
+        // WAV duration: (bytes - 44 header) / (24000Hz * 2 bytes * 1 channel)
+        const ttsDuration = (wholeAudio.byteLength - 44) / 48000;
+        const targetDuration = videoDuration || ttsDuration;
+        const ratio = ttsDuration / Math.max(targetDuration, 0.1);
 
-        const segDuration = seg.end - seg.start;
-        // Estimate audio duration from file size (rough: mp3 at 32kbps = 4000 bytes/sec)
-        const audioDuration = buffer.byteLength / 4000;
-        const ratio = audioDuration / Math.max(segDuration, 0.1);
+        const buildAtempo = (r: number): string => {
+          if (r >= 0.5 && r <= 2.0) return `atempo=${r.toFixed(4)}`;
+          if (r > 2.0) return `atempo=2.0,${buildAtempo(r / 2.0)}`;
+          return `atempo=0.5,${buildAtempo(r / 0.5)}`;
+        };
 
-        let filter = `[${i + 1}:a]`;
-        // Compress if audio is too long (up to 1.8x speed), expand if too short
-        if (ratio > 1.05) {
-          const speed = Math.min(ratio, 1.8);
-          filter += `atempo=${speed.toFixed(3)},`;
-        } else if (ratio < 0.8) {
-          filter += `atempo=${Math.max(ratio, 0.5).toFixed(3)},`;
+        setProgress({ step: 'syncing', message: `Adjusting audio speed (${ratio.toFixed(2)}x)...`, percent: 82 });
+        await ffmpeg.writeFile('dubbed.wav', new Uint8Array(wholeAudio));
+        const atempoFilter = Math.abs(ratio - 1.0) > 0.02 ? buildAtempo(ratio) : 'acopy';
+        await ffmpeg.exec(['-i', 'dubbed.wav', '-filter:a', atempoFilter, '-y', 'dubbed_adj.wav']);
+
+        setProgress({ step: 'merging', message: 'Merging with video...', percent: 90 });
+        await ffmpeg.exec([
+          '-i', 'input.mp4', '-i', 'dubbed_adj.wav',
+          '-map', '0:v', '-map', '1:a',
+          '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
+        ]);
+
+      } else {
+        // ── Per-segment mode for OpenAI / Edge TTS ──
+        const segmentBuffers: { seg: TranslatedSegment; buffer: ArrayBuffer }[] = [];
+        for (let i = 0; i < translatedSegs.length; i++) {
+          const seg = translatedSegs[i];
+          setProgress({ step: 'tts', message: `Speech ${i + 1}/${translatedSegs.length}...`, percent: 60 + Math.round((i / translatedSegs.length) * 20) });
+          let buffer: ArrayBuffer;
+          if (ttsProvider === 'openai' && openaiKey) {
+            buffer = await ttsOpenAI(seg.translatedText, selectedVoice, openaiKey);
+          } else {
+            buffer = await ttsEdge(seg.translatedText, selectedVoice);
+          }
+          segmentBuffers.push({ seg, buffer });
         }
-        filter += `adelay=${Math.round(seg.start * 1000)}|${Math.round(seg.start * 1000)},apad[a${i}]`;
-        filterParts.push(filter);
+
+        // Build synced timeline
+        setProgress({ step: 'syncing', message: 'Syncing audio to video timeline...', percent: 82 });
+        const filterParts: string[] = [];
+        const inputArgs: string[] = ['-i', 'input.mp4'];
+        for (let i = 0; i < segmentBuffers.length; i++) {
+          const { seg, buffer } = segmentBuffers[i];
+          const filename = `seg_${i}.mp3`;
+          await ffmpeg.writeFile(filename, new Uint8Array(buffer));
+          inputArgs.push('-i', filename);
+          const ratio = (buffer.byteLength / 4000) / Math.max(seg.end - seg.start, 0.1);
+          let filter = `[${i + 1}:a]`;
+          if (ratio > 1.05) filter += `atempo=${Math.min(ratio, 1.8).toFixed(3)},`;
+          else if (ratio < 0.8) filter += `atempo=${Math.max(ratio, 0.5).toFixed(3)},`;
+          filter += `adelay=${Math.round(seg.start * 1000)}|${Math.round(seg.start * 1000)},apad[a${i}]`;
+          filterParts.push(filter);
+        }
+        const mixInputs = segmentBuffers.map((_, i) => `[a${i}]`).join('');
+        const filterComplex = [...filterParts, `${mixInputs}amix=inputs=${segmentBuffers.length}:normalize=0[aout]`].join('; ');
+
+        setProgress({ step: 'merging', message: 'Merging with video...', percent: 90 });
+        await ffmpeg.exec([
+          ...inputArgs, '-filter_complex', filterComplex,
+          '-map', '0:v', '-map', '[aout]',
+          '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
+        ]);
       }
-
-      // Mix all segments
-      const mixInputs = segmentBuffers.map((_, i) => `[a${i}]`).join('');
-      const filterComplex = [
-        ...filterParts,
-        `${mixInputs}amix=inputs=${segmentBuffers.length}:normalize=0[aout]`,
-      ].join('; ');
-
-      // Step 7: Merge dubbed audio with original video (replacing audio)
-      setProgress({ step: 'merging', message: 'Merging dubbed audio with video...', percent: 90 });
-      await ffmpeg.exec([
-        ...inputArgs,
-        '-filter_complex', filterComplex,
-        '-map', '0:v',
-        '-map', '[aout]',
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-shortest',
-        '-y', 'output.mp4',
-      ]);
 
       const outputData = await ffmpeg.readFile('output.mp4');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -556,22 +567,28 @@ export default function DubberPage() {
               <div className="space-y-2">
                 {[
                   { id: 'openai', label: 'OpenAI TTS', badge: 'BYOK', desc: 'Best quality, needs key' },
-                  { id: 'gemini', label: 'Google TTS', badge: 'BYOK', desc: 'Via Gemini key' },
+                  { id: 'gemini', label: 'Google Flash TTS', badge: 'BYOK', desc: 'gemini-2.5-flash-preview-tts', model: 'flash' as const },
+                  { id: 'gemini', label: 'Google Pro TTS', badge: 'BYOK', desc: 'gemini-2.5-pro-preview-tts', model: 'pro' as const },
                   { id: 'edge', label: 'Edge TTS', badge: 'FREE', desc: 'No key needed' },
-                ].map(p => (
-                  <button
-                    key={p.id}
-                    onClick={() => saveProvider(p.id as 'openai' | 'edge' | 'gemini')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-all ${ttsProvider === p.id ? 'bg-violet-600' : 'bg-gray-800 hover:bg-gray-700'
-                      }`}
-                  >
-                    <div className="text-left">
-                      <span className="font-medium">{p.label}</span>
-                      <span className="text-xs text-gray-400 block">{p.desc}</span>
-                    </div>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${p.badge === 'FREE' ? 'bg-green-600' : 'bg-gray-600'}`}>{p.badge}</span>
-                  </button>
-                ))}
+                ].map((p, i) => {
+                  const isActive = ttsProvider === p.id && (!p.model || geminiTtsModel === p.model);
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        saveProvider(p.id as 'openai' | 'edge' | 'gemini');
+                        if (p.model) { setGeminiTtsModel(p.model); setSelectedVoice(GEMINI_VOICES[0]); }
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-all ${isActive ? 'bg-violet-600' : 'bg-gray-800 hover:bg-gray-700'}`}
+                    >
+                      <div className="text-left">
+                        <span className="font-medium">{p.label}</span>
+                        <span className="text-xs text-gray-400 block">{p.desc}</span>
+                      </div>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${p.badge === 'FREE' ? 'bg-green-600' : 'bg-gray-600'}`}>{p.badge}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Voice selector */}
@@ -582,11 +599,19 @@ export default function DubberPage() {
                   onChange={e => setSelectedVoice(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white focus:outline-none focus:border-violet-500"
                 >
-                  {currentVoiceOptions.map(v => (
-                    <option key={v.value} value={v.value}>{v.label}</option>
-                  ))}
+                  {ttsProvider === 'gemini'
+                    ? GEMINI_VOICES.map(v => <option key={v} value={v}>{v}</option>)
+                    : currentVoiceOptions.map(v => <option key={v.value} value={v.value}>{v.label}</option>)
+                  }
                 </select>
               </div>
+
+              {/* Speech style prompt for Gemini TTS */}
+              {ttsProvider === 'gemini' && (
+                <div className="mt-2 p-2 bg-gray-800 rounded-lg text-xs text-gray-400">
+                  💡 Tip: You can include style instructions in your <strong>Translation Guidelines</strong> — e.g. "Speak in a warm, friendly tone" — and Gemini TTS will follow them.
+                </div>
+              )}
             </div>
           </div>
         </div>
