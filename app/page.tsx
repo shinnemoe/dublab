@@ -336,8 +336,13 @@ export default function DubberPage() {
 
         setProgress({ step: 'syncing', message: `Adjusting audio speed (${ratio.toFixed(2)}x)...`, percent: 82 });
         await ffmpeg.writeFile('dubbed.wav', new Uint8Array(wholeAudio));
-        const atempoFilter = Math.abs(ratio - 1.0) > 0.02 ? buildAtempo(ratio) : 'acopy';
-        await ffmpeg.exec(['-i', 'dubbed.wav', '-filter:a', atempoFilter, '-y', 'dubbed_adj.wav']);
+        const needsAtempo = Math.abs(ratio - 1.0) > 0.02;
+        if (needsAtempo) {
+          await ffmpeg.exec(['-i', 'dubbed.wav', '-filter:a', buildAtempo(ratio), '-y', 'dubbed_adj.wav']);
+        } else {
+          // No speed adjustment needed — copy as-is
+          await ffmpeg.exec(['-i', 'dubbed.wav', '-c:a', 'copy', '-y', 'dubbed_adj.wav']);
+        }
 
         setProgress({ step: 'merging', message: 'Merging with video...', percent: 90 });
         await ffmpeg.exec([

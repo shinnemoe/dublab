@@ -22,17 +22,25 @@ async function translateBatchGemini(
     batch: { id: number; text: string }[],
     targetLanguage: string,
     guidelineNote: string,
-    geminiKey: string
+    geminiKey: string,
+    isRetry = false
 ): Promise<{ id: number; translatedText: string }[]> {
-    const prompt = `You are a professional translator. Translate each speech segment to ${targetLanguage}.
-Keep translations natural and conversational, suitable for dubbing.
-Preserve the meaning and tone of the original.${guidelineNote}
+    const retryNote = isRetry
+        ? '\n\nIMPORTANT: Some segments were NOT translated in the previous attempt. You MUST translate ALL of them this time. Do NOT leave any segment in its original language.'
+        : '';
+    const prompt = `You are a professional dubbing translator. Your job is to translate EVERY SINGLE segment below into ${targetLanguage}.
 
-Input segments (JSON array):
+RULES:
+- Translate ALL ${batch.length} segments — no exceptions, no skipping.
+- Output ONLY a JSON array. No markdown, no code fences, no explanation text.
+- Keep translations natural and conversational for spoken audio dubbing.
+- Preserve meaning and tone.${guidelineNote}${retryNote}
+
+Input (JSON array of segments to translate):
 ${JSON.stringify(batch)}
 
-Return ONLY a JSON array. Each item must have "id" and "translatedText". No extra text, no markdown.
-Example: [{"id": 0, "translatedText": "translated text here"}]`;
+Required output format (translate every id):
+[{"id": 0, "translatedText": "..."}, {"id": 1, "translatedText": "..."}, ...]`;
 
     const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
@@ -85,6 +93,23 @@ export async function translateWithGemini(
         const batch = segments.slice(i, i + BATCH_SIZE).map(s => ({ id: s.id, text: s.text }));
         const results = await translateBatchGemini(batch, targetLanguage, guidelineNote, geminiKey);
         allTranslations.push(...results);
+    }
+
+    // Retry any segments that weren't translated (translatedText === original text)
+    const missed = segments.filter(seg => {
+        const t = allTranslations.find(t => t.id === seg.id);
+        return !t || t.translatedText === seg.text || t.translatedText.trim() === '';
+    });
+
+    if (missed.length > 0) {
+        const retryBatch = missed.map(s => ({ id: s.id, text: s.text }));
+        const retried = await translateBatchGemini(retryBatch, targetLanguage, guidelineNote, geminiKey, true);
+        // Merge retried results (overwrite previous for those ids)
+        for (const r of retried) {
+            const idx = allTranslations.findIndex(t => t.id === r.id);
+            if (idx >= 0) allTranslations[idx] = r;
+            else allTranslations.push(r);
+        }
     }
 
     return segments.map(seg => {
