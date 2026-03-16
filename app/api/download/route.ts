@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { readFile, unlink } from 'fs/promises';
-import { randomUUID } from 'crypto';
+import ytdl from '@distube/ytdl-core';
 
 export const runtime = 'nodejs';
-
-const execFileAsync = promisify(execFile);
 
 function isYouTubeUrl(url: string): boolean {
     return /youtube\.com|youtu\.be/.test(url);
@@ -19,33 +12,22 @@ export async function GET(req: NextRequest) {
     if (!url) return NextResponse.json({ error: 'No URL provided' }, { status: 400 });
 
     // ── YouTube (includes Shorts) ─────────────────────────────────────────────
-    // Note: MP4 format requires seekable output, cannot stream to stdout.
-    // We download to a temp file then serve it — reliable for Shorts (< 100MB).
     if (isYouTubeUrl(url)) {
-        const tmpPath = join(tmpdir(), `yt-${randomUUID()}.mp4`);
         try {
-            // 720p mp4 + best m4a audio, merged into mp4 file
-            await execFileAsync('yt-dlp', [
-                '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
-                '--merge-output-format', 'mp4',
-                '-o', tmpPath,
-                '--no-playlist',
-                url,
-            ], { maxBuffer: 10 * 1024 * 1024 }); // 10MB for stderr/stdout
+            const info = await ytdl.getInfo(url);
+            // Prefer a combined mp4 format; fall back to best available
+            const format =
+                ytdl.chooseFormat(info.formats, {
+                    quality: 'highestvideo',
+                    filter: f => f.container === 'mp4' && !!f.hasVideo && !!f.hasAudio,
+                }) ??
+                ytdl.chooseFormat(info.formats, { quality: 'highest' });
 
-            const videoData = await readFile(tmpPath);
-            return new NextResponse(videoData, {
-                headers: {
-                    'Content-Type': 'video/mp4',
-                    'Content-Length': videoData.length.toString(),
-                    'Cache-Control': 'no-store',
-                    'Access-Control-Allow-Origin': '*',
-                },
-            });
+            // Redirect the browser straight to YouTube's signed CDN URL.
+            // The browser already has YouTube cookies so there's no bot check.
+            return NextResponse.redirect(format.url, 307);
         } catch (err: any) {
-            return NextResponse.json({ error: 'yt-dlp failed: ' + err.message }, { status: 500 });
-        } finally {
-            await unlink(tmpPath).catch(() => { });
+            return NextResponse.json({ error: 'YouTube download failed: ' + err.message }, { status: 500 });
         }
     }
 

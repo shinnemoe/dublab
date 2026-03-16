@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 
 export const runtime = 'nodejs';
-
-const execFileAsync = promisify(execFile);
 
 function isYouTubeUrl(url: string): boolean {
     return /youtube\.com|youtu\.be/.test(url);
@@ -21,13 +17,14 @@ export async function GET(req: NextRequest) {
             const videoIdMatch = url.match(/(?:shorts\/|v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
             const videoId = videoIdMatch?.[1] || '';
 
-            const { stdout } = await execFileAsync('yt-dlp', [
-                '--print', 'title',
-                '--no-download',
-                '--no-playlist',
-                url,
-            ]);
-            const title = stdout.trim();
+            // Use YouTube's official oEmbed endpoint — no API key, no bot detection
+            const oembedRes = await fetch(
+                `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`
+            );
+            if (!oembedRes.ok) throw new Error(`oEmbed error ${oembedRes.status}`);
+            const oembed = await oembedRes.json();
+            const title = oembed.title as string;
+
             return NextResponse.json({
                 videoUrl: '/api/download?url=' + encodeURIComponent(url),
                 pageTitle: title,
