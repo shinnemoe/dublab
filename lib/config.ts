@@ -2,12 +2,12 @@
 
 export const STORAGE_KEYS = {
     GEMINI_KEY: 'dubber_gemini_key',
-    OPENAI_KEY: 'dubber_openai_key',
     TTS_PROVIDER: 'dubber_tts_provider',
     TARGET_LANG: 'dubber_target_lang',
     CUSTOM_LANGS: 'dubber_custom_langs',
     TRANSLATION_RULES: 'dubber_translation_rules',
     TTS_RULES: 'dubber_tts_rules',
+    GEMINI_SPEED_MODE: 'dubber_gemini_speed_mode',
 };
 
 export function getKey(key: string): string {
@@ -30,8 +30,6 @@ export const DEFAULT_LANGUAGES = [
     { code: 'zh', name: 'Chinese', flag: '🇨🇳' },
     { code: 'ko', name: 'Korean', flag: '🇰🇷' },
 ];
-
-export const OPENAI_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
 
 export const EDGE_TTS_VOICES: Record<string, { name: string; voice: string }[]> = {
     en: [

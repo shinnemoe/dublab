@@ -4,6 +4,23 @@ export interface TranslatedSegment extends TranscriptSegment {
     translatedText: string;
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isTransientGeminiError(status: number, message: string): boolean {
+    if (status === 429 || status >= 500) return true;
+    return /high demand|try again later|temporarily unavailable|overloaded|rate limit|quota exceeded/i.test(message);
+}
+
+function parseRetryDelayMs(message: string): number | null {
+    const m = message.match(/retry in\s+([\d.]+)s/i);
+    if (!m) return null;
+    const seconds = Number(m[1]);
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    return Math.ceil(seconds * 1000);
+}
+
 // Strip markdown code fences and extract JSON array/object
 function cleanJson(raw: string): string {
     // Remove ```json ... ``` or ``` ... ```
@@ -42,24 +59,46 @@ ${JSON.stringify(batch)}
 Required output format (translate every id):
 [{"id": 0, "translatedText": "..."}, {"id": 1, "translatedText": "..."}, ...]`;
 
-    const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: 'application/json' }
-            }),
-        }
-    );
+    const maxAttempts = 4;
+    let data: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } | null = null;
+    let lastError = '';
 
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(`Gemini translation failed: ${err.error?.message || res.statusText}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { responseMimeType: 'application/json' }
+                }),
+            }
+        );
+
+        if (res.ok) {
+            data = await res.json();
+            break;
+        }
+
+        const err = await res.json().catch(() => ({} as { error?: { message?: string } }));
+        const message = err.error?.message || res.statusText;
+        lastError = `Gemini translation failed: ${message}`;
+
+        if (!isTransientGeminiError(res.status, message) || attempt === maxAttempts) {
+            throw new Error(lastError);
+        }
+
+        const serverDelay = parseRetryDelayMs(message);
+        const backoffDelay = 1200 * attempt * attempt;
+        const delay = Math.max(serverDelay ?? 0, backoffDelay);
+        await sleep(delay);
     }
 
-    const data = await res.json();
+    if (!data) {
+        throw new Error(lastError || 'Gemini translation failed');
+    }
+
     const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
     try {
         return JSON.parse(cleanJson(rawText));
@@ -86,7 +125,7 @@ export async function translateWithGemini(
         ? `\n\nAdditional translation guidelines:\n${guidelines}`
         : '';
 
-    const BATCH_SIZE = 20;
+    const BATCH_SIZE = 80;
     const allTranslations: { id: number; translatedText: string }[] = [];
 
     for (let i = 0; i < segments.length; i += BATCH_SIZE) {
@@ -118,59 +157,3 @@ export async function translateWithGemini(
     });
 }
 
-// Translate using OpenAI GPT-4o mini — batched for consistency
-export async function translateWithOpenAI(
-    segments: TranscriptSegment[],
-    targetLanguage: string,
-    guidelines: string,
-    openaiKey: string
-): Promise<TranslatedSegment[]> {
-    const guidelineNote = guidelines.trim()
-        ? `\n\nAdditional translation guidelines:\n${guidelines}`
-        : '';
-
-    const BATCH_SIZE = 30;
-    const allTranslations: { id: number; translatedText: string }[] = [];
-
-    for (let i = 0; i < segments.length; i += BATCH_SIZE) {
-        const batch = segments.slice(i, i + BATCH_SIZE).map(s => ({ id: s.id, text: s.text }));
-
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: 'gpt-4o-mini',
-                response_format: { type: 'json_object' },
-                messages: [
-                    {
-                        role: 'system',
-                        content: `You are a professional translator for dubbing. Translate speech segments to ${targetLanguage}. Keep translations natural for spoken audio.${guidelineNote}`,
-                    },
-                    {
-                        role: 'user',
-                        content: `Translate these segments. Return JSON: {"segments": [{"id": 0, "translatedText": "..."}]}\n\n${JSON.stringify(batch)}`,
-                    },
-                ],
-            }),
-        });
-
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(`OpenAI translation failed: ${err.error?.message || res.statusText}`);
-        }
-
-        const data = await res.json();
-        const rawContent = data.choices[0].message.content;
-        try {
-            const result = JSON.parse(cleanJson(rawContent));
-            allTranslations.push(...(result.segments || result));
-        } catch {
-            throw new Error(`Failed to parse OpenAI translation JSON: ${rawContent.slice(0, 200)}`);
-        }
-    }
-
-    return segments.map(seg => {
-        const t = allTranslations.find(t => t.id === seg.id);
-        return { ...seg, translatedText: t?.translatedText || seg.text };
-    });
-}

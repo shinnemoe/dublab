@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
     const text = req.nextUrl.searchParams.get('text');
     let voice = req.nextUrl.searchParams.get('voice') || 'en-US-AriaNeural';
 
-    // Edge TTS requires voices in format xx-XX-VoiceName — fallback if an OpenAI voice was passed
+    // Edge TTS requires voices in format xx-XX-VoiceName
     if (!/^\w{2}-\w{2}-\w/.test(voice)) {
         voice = 'en-US-AriaNeural';
     }

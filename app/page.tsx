@@ -2,12 +2,12 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  DEFAULT_LANGUAGES, OPENAI_VOICES, EDGE_TTS_VOICES,
+  DEFAULT_LANGUAGES, EDGE_TTS_VOICES,
   getKey, setKey, STORAGE_KEYS
 } from '@/lib/config';
-import { transcribeWithOpenAI, transcribeWithGemini, TranscriptSegment } from '@/lib/transcribe';
-import { translateWithGemini, translateWithOpenAI, TranslatedSegment } from '@/lib/translate';
-import { ttsOpenAI, ttsEdge, ttsGemini, GEMINI_VOICES, GeminiTTSModel } from '@/lib/tts';
+import { transcribeWithGemini, transcribeWithLocal, TranscriptSegment } from '@/lib/transcribe';
+import { translateWithGemini, TranslatedSegment } from '@/lib/translate';
+import { ttsEdge, ttsGemini, GEMINI_VOICES, GeminiTTSModel } from '@/lib/tts';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
@@ -19,19 +19,21 @@ interface ProgressInfo {
   percent: number;
 }
 
+type GeminiSpeedMode = 'auto' | '1.2' | '1.3' | '1.4';
+
 export default function DubberPage() {
   // Auth/keys
   const [geminiKey, setGeminiKeyState] = useState('');
-  const [openaiKey, setOpenaiKeyState] = useState('');
   const [showKeys, setShowKeys] = useState(false);
 
   // Settings
   const [ttsProvider, setTtsProvider] = useState<'edge' | 'gemini'>('gemini');
   const [targetLang, setTargetLang] = useState('my');
-  const [selectedVoice, setSelectedVoice] = useState('alloy');
+  const [selectedVoice, setSelectedVoice] = useState(GEMINI_VOICES[0]);
   const [geminiTtsModel, setGeminiTtsModel] = useState<GeminiTTSModel>('flash');
   const [translationRules, setTranslationRules] = useState('');
   const [ttsRules, setTtsRules] = useState('');
+  const [geminiSpeedMode, setGeminiSpeedMode] = useState<GeminiSpeedMode>('auto');
   const [customLangs, setCustomLangs] = useState<{ code: string; name: string; flag: string }[]>([]);
   const [newLangName, setNewLangName] = useState('');
   const [showAddLang, setShowAddLang] = useState(false);
@@ -66,10 +68,9 @@ export default function DubberPage() {
 
   // Load settings from localStorage
   useEffect(() => {
-    setGeminiKeyState(getKey(STORAGE_KEYS.GEMINI_KEY));
-    setOpenaiKeyState(getKey(STORAGE_KEYS.OPENAI_KEY));
+    setGeminiKeyState(getKey(STORAGE_KEYS.GEMINI_KEY).trim());
     const savedProvider = getKey(STORAGE_KEYS.TTS_PROVIDER);
-    // Only accept valid providers (filter out legacy 'openai' TTS)
+    // Only accept valid providers
     if (savedProvider === 'edge' || savedProvider === 'gemini') setTtsProvider(savedProvider);
     const savedLang = getKey(STORAGE_KEYS.TARGET_LANG) || 'my';
     if (savedLang) setTargetLang(savedLang);
@@ -81,6 +82,10 @@ export default function DubberPage() {
     if (savedTranslationRules) setTranslationRules(savedTranslationRules);
     const savedTtsRules = getKey(STORAGE_KEYS.TTS_RULES);
     if (savedTtsRules) setTtsRules(savedTtsRules);
+    const savedSpeedMode = getKey(STORAGE_KEYS.GEMINI_SPEED_MODE) as GeminiSpeedMode;
+    if (savedSpeedMode === 'auto' || savedSpeedMode === '1.2' || savedSpeedMode === '1.3' || savedSpeedMode === '1.4') {
+      setGeminiSpeedMode(savedSpeedMode);
+    }
     // Reset voice if saved voice is incompatible with saved provider
     const savedVoice = selectedVoice;
     if (savedProvider === 'edge' && !/^[a-z]{2}-[A-Z]{2}-/.test(savedVoice)) {
@@ -89,8 +94,11 @@ export default function DubberPage() {
     }
   }, []);
 
-  const saveGeminiKey = (k: string) => { setGeminiKeyState(k); setKey(STORAGE_KEYS.GEMINI_KEY, k); };
-  const saveOpenaiKey = (k: string) => { setOpenaiKeyState(k); setKey(STORAGE_KEYS.OPENAI_KEY, k); };
+  const saveGeminiKey = (k: string) => {
+    const normalized = k.trim();
+    setGeminiKeyState(normalized);
+    setKey(STORAGE_KEYS.GEMINI_KEY, normalized);
+  };
   const saveProvider = (p: 'edge' | 'gemini') => {
     setTtsProvider(p);
     setKey(STORAGE_KEYS.TTS_PROVIDER, p);
@@ -102,6 +110,10 @@ export default function DubberPage() {
     }
   };
   const saveLang = (l: string) => { setTargetLang(l); setKey(STORAGE_KEYS.TARGET_LANG, l); };
+  const saveGeminiSpeedMode = (mode: GeminiSpeedMode) => {
+    setGeminiSpeedMode(mode);
+    setKey(STORAGE_KEYS.GEMINI_SPEED_MODE, mode);
+  };
 
   const addCustomLanguage = () => {
     if (!newLangName.trim()) return;
@@ -121,12 +133,7 @@ export default function DubberPage() {
       const voices = EDGE_TTS_VOICES[targetLang] || EDGE_TTS_VOICES['en'];
       return voices.map(v => ({ value: v.voice, label: v.name }));
     }
-    // Gemini uses Google TTS voice names
-    return [
-      { value: `${targetLang}-Wavenet-A`, label: 'Voice A' },
-      { value: `${targetLang}-Wavenet-B`, label: 'Voice B' },
-      { value: `${targetLang}-Wavenet-C`, label: 'Voice C' },
-    ];
+    return GEMINI_VOICES.map(v => ({ value: v, label: v }));
   };
 
   const loadFFmpeg = async () => {
@@ -141,6 +148,13 @@ export default function DubberPage() {
     });
     ffmpegLoaded.current = true;
     return ffmpeg;
+  };
+
+  const runFfmpeg = async (ffmpeg: FFmpeg, args: string[], step: string) => {
+    const code = await ffmpeg.exec(args);
+    if (code !== 0) {
+      throw new Error(`FFmpeg failed at ${step} (exit code ${code})`);
+    }
   };
 
   const handleFileSelect = (file: File) => {
@@ -200,7 +214,7 @@ export default function DubberPage() {
 
   const startDubbing = async () => {
     if (!videoFile && !videoUrl) { setError('Please upload a video or paste a URL first.'); return; }
-    if (ttsProvider !== 'edge' && !geminiKey && !openaiKey) {
+    if (!geminiKey) {
       setError('Please add an API key in the settings panel, or switch to Edge TTS (free).'); return;
     }
 
@@ -209,8 +223,8 @@ export default function DubberPage() {
     setTranscript([]);
     setTranslated([]);
 
-    if (!geminiKey && !openaiKey) {
-      setError('Please add at least one API key (Gemini or OpenAI) in the API Keys panel. Edge TTS is free for voice — but a key is still needed for transcription and translation.');
+    if (!geminiKey) {
+      setError('Please add your Gemini API key in the API Keys panel. Gemini is required for transcription and translation.');
       return;
     }
 
@@ -245,14 +259,18 @@ export default function DubberPage() {
 
       // Step 2: Extract audio as mp3
       setProgress({ step: 'extracting', message: 'Extracting audio from video...', percent: 15 });
-      await ffmpeg.exec(['-i', 'input.mp4', '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k', 'audio.mp3']);
-      const audioData = await ffmpeg.readFile('audio.mp3');
+      await runFfmpeg(ffmpeg, ['-i', 'input.mp4', '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k', '-y', 'audio.mp3'], 'audio extraction');
+      let audioData: Uint8Array;
+      try {
+        audioData = await ffmpeg.readFile('audio.mp3') as Uint8Array;
+      } catch {
+        throw new Error('FFmpeg could not read extracted audio file');
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const audioBlob = new Blob([audioData as any], { type: 'audio/mp3' });
 
-      // Step 3: Transcribe — OpenAI Whisper first (most accurate), Gemini as fallback
+      // Step 3: Transcribe — local first, Gemini fallback
       setProgress({ step: 'transcribing', message: 'Transcribing audio...', percent: 30 });
-      let segments: TranscriptSegment[];
 
       const tryGeminiTranscribe = async () => {
         const arrayBuf = await audioBlob.arrayBuffer();
@@ -266,35 +284,26 @@ export default function DubberPage() {
         return transcribeWithGemini(base64, 'audio/mp3', geminiKey);
       };
 
-      if (openaiKey) {
-        try {
-          segments = await transcribeWithOpenAI(audioBlob, openaiKey);
-        } catch (err: any) {
-          if (geminiKey) {
-            setProgress({ step: 'transcribing', message: 'OpenAI Whisper failed — retrying with Gemini...', percent: 32 });
-            segments = await tryGeminiTranscribe();
-          } else {
-            throw err; // no fallback available
-          }
-        }
-      } else if (geminiKey) {
+      const isProduction = process.env.NODE_ENV === 'production';
+      let segments: TranscriptSegment[];
+      if (isProduction) {
+        setProgress({ step: 'transcribing', message: 'Transcribing with Gemini (production mode)...', percent: 30 });
         segments = await tryGeminiTranscribe();
       } else {
-        throw new Error('No API key for transcription. Please add a Gemini or OpenAI key.');
+        try {
+          setProgress({ step: 'transcribing', message: 'Transcribing locally (free)...', percent: 30 });
+          segments = await transcribeWithLocal(audioBlob);
+        } catch {
+          setProgress({ step: 'transcribing', message: 'Local transcription unavailable — retrying with Gemini...', percent: 32 });
+          segments = await tryGeminiTranscribe();
+        }
       }
       setTranscript(segments);
 
-      // Step 4: Translate — Gemini first (better quality), OpenAI as fallback
+      // Step 4: Translate — Gemini only
       setProgress({ step: 'translating', message: `Translating to ${allLanguages.find(l => l.code === targetLang)?.name || targetLang}...`, percent: 50 });
       const langName = allLanguages.find(l => l.code === targetLang)?.name || targetLang;
-      let translatedSegs;
-      if (geminiKey) {
-        translatedSegs = await translateWithGemini(segments, langName, translationRules, geminiKey);
-      } else if (openaiKey) {
-        translatedSegs = await translateWithOpenAI(segments, langName, translationRules, openaiKey);
-      } else {
-        throw new Error('No API key for translation.');
-      }
+      const translatedSegs = await translateWithGemini(segments, langName, translationRules, geminiKey);
       setTranslated(translatedSegs);
 
       // Step 5: TTS
@@ -308,7 +317,7 @@ export default function DubberPage() {
             const m = message.match(/Duration: (\d+):(\d+):([\d.]+)/);
             if (m) dur = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
           });
-          await ffmpeg.exec(['-i', 'input.mp4', '-f', 'null', '-']);
+          await runFfmpeg(ffmpeg, ['-i', 'input.mp4', '-f', 'null', '-'], 'video duration probe');
           resolve(dur);
         })();
       });
@@ -323,10 +332,11 @@ export default function DubberPage() {
           : fullText;
         const wholeAudio = await ttsGemini(ttsPrompt, selectedVoice, geminiKey, geminiTtsModel);
 
-        // WAV duration: (bytes - 44 header) / (24000Hz * 2 bytes * 1 channel)
         const ttsDuration = (wholeAudio.byteLength - 44) / 48000;
         const targetDuration = videoDuration || ttsDuration;
         const ratio = ttsDuration / Math.max(targetDuration, 0.1);
+        const maxSpeed = geminiSpeedMode === 'auto' ? 1.4 : parseFloat(geminiSpeedMode);
+        const appliedRatio = ratio > 1 ? Math.min(ratio, maxSpeed) : ratio;
 
         const buildAtempo = (r: number): string => {
           if (r >= 0.5 && r <= 2.0) return `atempo=${r.toFixed(4)}`;
@@ -334,32 +344,43 @@ export default function DubberPage() {
           return `atempo=0.5,${buildAtempo(r / 0.5)}`;
         };
 
-        setProgress({ step: 'syncing', message: `Adjusting audio speed (${ratio.toFixed(2)}x)...`, percent: 82 });
+        setProgress({ step: 'syncing', message: `Adjusting audio speed (${appliedRatio.toFixed(2)}x)...`, percent: 82 });
         await ffmpeg.writeFile('dubbed.wav', new Uint8Array(wholeAudio));
-        const needsAtempo = Math.abs(ratio - 1.0) > 0.02;
+        const needsAtempo = Math.abs(appliedRatio - 1.0) > 0.02;
         if (needsAtempo) {
-          await ffmpeg.exec(['-i', 'dubbed.wav', '-filter:a', buildAtempo(ratio), '-y', 'dubbed_adj.wav']);
+          await runFfmpeg(ffmpeg, ['-i', 'dubbed.wav', '-filter:a', buildAtempo(appliedRatio), '-y', 'dubbed_adj.wav'], 'audio speed adjust');
         } else {
-          // No speed adjustment needed — copy as-is
-          await ffmpeg.exec(['-i', 'dubbed.wav', '-c:a', 'copy', '-y', 'dubbed_adj.wav']);
+          await runFfmpeg(ffmpeg, ['-i', 'dubbed.wav', '-c:a', 'copy', '-y', 'dubbed_adj.wav'], 'audio copy');
         }
 
+        const adjustedAudioDuration = ttsDuration / Math.max(appliedRatio, 0.01);
+        const baseVideoDuration = Math.max(targetDuration, 0.1);
+        const videoTimeScale = adjustedAudioDuration / baseVideoDuration;
+
         setProgress({ step: 'merging', message: 'Merging with video...', percent: 90 });
-        await ffmpeg.exec([
-          '-i', 'input.mp4', '-i', 'dubbed_adj.wav',
-          '-map', '0:v', '-map', '1:a',
-          '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
-        ]);
+        if (Math.abs(videoTimeScale - 1.0) > 0.01) {
+          await runFfmpeg(ffmpeg, [
+            '-i', 'input.mp4', '-i', 'dubbed_adj.wav',
+            '-filter_complex', `[0:v]setpts=${videoTimeScale.toFixed(6)}*PTS[v]`,
+            '-map', '[v]', '-map', '1:a',
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+            '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
+          ], 'video merge');
+        } else {
+          await runFfmpeg(ffmpeg, [
+            '-i', 'input.mp4', '-i', 'dubbed_adj.wav',
+            '-map', '0:v', '-map', '1:a',
+            '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
+          ], 'video merge');
+        }
 
       } else {
-        // ── Per-segment mode for OpenAI / Edge TTS ──
+      // ── Per-segment mode for Edge TTS ──
         const segmentBuffers: { seg: TranslatedSegment; buffer: ArrayBuffer }[] = [];
         for (let i = 0; i < translatedSegs.length; i++) {
           const seg = translatedSegs[i];
           setProgress({ step: 'tts', message: `Speech ${i + 1}/${translatedSegs.length}...`, percent: 60 + Math.round((i / translatedSegs.length) * 20) });
-          let buffer: ArrayBuffer;
-          // Edge TTS for per-segment
-          buffer = await ttsEdge(seg.translatedText, selectedVoice);
+          const buffer = await ttsEdge(seg.translatedText, selectedVoice);
           segmentBuffers.push({ seg, buffer });
         }
 
@@ -383,14 +404,19 @@ export default function DubberPage() {
         const filterComplex = [...filterParts, `${mixInputs}amix=inputs=${segmentBuffers.length}:normalize=0[aout]`].join('; ');
 
         setProgress({ step: 'merging', message: 'Merging with video...', percent: 90 });
-        await ffmpeg.exec([
+        await runFfmpeg(ffmpeg, [
           ...inputArgs, '-filter_complex', filterComplex,
           '-map', '0:v', '-map', '[aout]',
           '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', 'output.mp4',
-        ]);
+        ], 'timeline merge');
       }
 
-      const outputData = await ffmpeg.readFile('output.mp4');
+      let outputData: Uint8Array;
+      try {
+        outputData = await ffmpeg.readFile('output.mp4') as Uint8Array;
+      } catch {
+        throw new Error('FFmpeg did not produce output.mp4');
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const blob = new Blob([outputData as any], { type: 'video/mp4' });
       setOutputUrl(URL.createObjectURL(blob));
@@ -433,7 +459,7 @@ export default function DubberPage() {
         {showKeys && (
           <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 space-y-4">
             <h2 className="font-semibold text-gray-200">🔐 API Keys (stored in your browser only)</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4">
               <div>
                 <label className="text-xs text-gray-400 mb-1 block">Gemini API Key (for transcription, translation & TTS)</label>
                 <input
@@ -444,18 +470,8 @@ export default function DubberPage() {
                   className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500"
                 />
               </div>
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">OpenAI API Key (for Whisper transcription & TTS)</label>
-                <input
-                  type="password"
-                  value={openaiKey}
-                  onChange={e => saveOpenaiKey(e.target.value)}
-                  placeholder="sk-proj-..."
-                  className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-violet-500"
-                />
-              </div>
             </div>
-            <p className="text-xs text-gray-500">💡 Keys are stored in browser localStorage only — never sent to our servers. Use Edge TTS for fully free operation (no key needed).</p>
+            <p className="text-xs text-gray-500">💡 Keys are stored in browser localStorage only — never sent to our servers.</p>
           </div>
         )}
 
@@ -666,10 +682,19 @@ export default function DubberPage() {
                 </select>
               </div>
 
-              {/* Speech style prompt for Gemini TTS */}
               {ttsProvider === 'gemini' && (
-                <div className="mt-2 p-2 bg-gray-800 rounded-lg text-xs text-gray-400">
-                  💡 Tip: You can include style instructions in your <strong>Translation Guidelines</strong> — e.g. "Speak in a warm, friendly tone" — and Gemini TTS will follow them.
+                <div className="mt-3">
+                  <label className="text-xs text-gray-400 mb-1 block">Max Speech Speed</label>
+                  <select
+                    value={geminiSpeedMode}
+                    onChange={e => saveGeminiSpeedMode(e.target.value as GeminiSpeedMode)}
+                    className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 text-sm text-white focus:outline-none focus:border-violet-500"
+                  >
+                    <option value="auto">Auto (default)</option>
+                    <option value="1.2">1.2x</option>
+                    <option value="1.3">1.3x</option>
+                    <option value="1.4">1.4x</option>
+                  </select>
                 </div>
               )}
             </div>

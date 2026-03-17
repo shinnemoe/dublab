@@ -1,12 +1,12 @@
-// TTS abstraction — supports OpenAI TTS, Edge TTS (free), and Gemini TTS
+// TTS abstraction — supports Edge TTS (free) and Gemini TTS
 
-export type TTSProvider = 'openai' | 'edge' | 'gemini';
+export type TTSProvider = 'edge' | 'gemini';
 export type GeminiTTSModel = 'flash' | 'pro';
 
 // Prebuilt Gemini voice names (30 voices)
 export const GEMINI_VOICES = [
-    'Aoede', 'Puck', 'Charon', 'Fenrir', 'Kore',
-    'Leda', 'Orus', 'Perseus', 'Zephyr', 'Achernar',
+    'aoede', 'puck', 'charon', 'fenrir', 'kore',
+    'leda', 'orus', 'zephyr', 'achernar', 'zubenelgenubi',
 ];
 
 // ─── Helper: PCM (L16 24kHz mono) → WAV ArrayBuffer ────────────────────────
@@ -33,25 +33,6 @@ function pcmToWav(pcmBytes: Uint8Array, sampleRate = 24000, channels = 1, bitsPe
     view.setUint32(40, dataSize, true);
     new Uint8Array(buffer).set(pcmBytes, 44);
     return buffer;
-}
-
-// ─── OpenAI TTS ─────────────────────────────────────────────────────────────
-export async function ttsOpenAI(
-    text: string,
-    voice: string,
-    openaiKey: string,
-    speed = 1.0
-): Promise<ArrayBuffer> {
-    const res = await fetch('https://api.openai.com/v1/audio/speech', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'tts-1', input: text, voice, speed: Math.max(0.25, Math.min(4.0, speed)), response_format: 'mp3' }),
-    });
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(`OpenAI TTS failed: ${err.error?.message || res.statusText}`);
-    }
-    return res.arrayBuffer();
 }
 
 // ─── Edge TTS (free, server-side proxy) ─────────────────────────────────────
@@ -86,7 +67,7 @@ export async function ttsGemini(
                     responseModalities: ['AUDIO'],
                     speechConfig: {
                         voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName },
+                            prebuiltVoiceConfig: { voiceName: voiceName.toLowerCase() },
                         },
                     },
                 },
